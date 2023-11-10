@@ -19,7 +19,7 @@ from utils import nearest_point
 @dataclass
 class mpc_config:
     NXK: int = 4  # length of kinematic state vector: z = [x, y, v, yaw]
-    NU: int = 2  # length of input vector: u = = [steering speed, acceleration]
+    NU: int = 2  # length of input vector: u = = [steering, acceleration]
     TK: int = 8  # finite time horizon length kinematic
 
     # ---------------------------------------------------
@@ -75,7 +75,6 @@ class MPC(Node):
         self.waypoints = None
 
         self.config = mpc_config()
-        self.odelta_v = None
         self.odelta = None
         self.oa = None
         self.init_flag = 0
@@ -97,16 +96,16 @@ class MPC(Node):
         # TODO: solve the MPC control problem
         (
             self.oa,
-            self.odelta_v,
+            self.odelta,
             ox,
             oy,
             oyaw,
             ov,
             state_predict,
-        ) = self.linear_mpc_control(ref_path, x0, self.oa, self.odelta_v)
+        ) = self.linear_mpc_control(ref_path, x0, self.oa, self.odelta)
 
         # TODO: publish drive message.
-        steer_output = self.odelta_v[0]
+        steer_output = self.odelta[0]
         speed_output = vehicle_state.v + self.oa[0] * self.config.DTK
 
     def mpc_prob_init(self):
