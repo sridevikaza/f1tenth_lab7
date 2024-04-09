@@ -13,9 +13,11 @@ from scipy.sparse import block_diag, csc_matrix, diags
 from sensor_msgs.msg import LaserScan
 # from utils import nearest_point
 from nav_msgs.msg import Odometry
-# import tf_transformations
+import transforms3d.quaternions as quats
+import transforms3d.euler as euler
 from geometry_msgs.msg import Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
+from nav_msgs.msg import Path
 
 
 
@@ -23,27 +25,31 @@ from visualization_msgs.msg import Marker, MarkerArray
 class mpc_config:
     NXK: int = 4  # length of kinematic state vector: z = [x, y, v, yaw]
     NU: int = 2  # length of input vector: u = = [steering, acceleration]
-    TK: int = 8  # finite time horizon length kinematic
+    TK: int = 3 #8  # finite time horizon length kinematic
 
     # ---------------------------------------------------
     # you may need to tune the following matrices
     Rk: list = field(
-        default_factory=lambda: np.diag([0.01, 100.0])
+        # default_factory=lambda: np.diag([0.01, 100.0])
+        default_factory=lambda: np.diag([0.01, 20.0])
     )  # input cost matrix, penalty for inputs - [accel, steering]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.01, 100.0])
+        default_factory=lambda: np.diag([0.01, 20.0])
+        # default_factory=lambda: np.diag([0.01, 100.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering]
     Qk: list = field(
         default_factory=lambda: np.diag([13.5, 13.5, 13.0, 5.5])
+        # default_factory=lambda: np.diag([25, 25, 5, 25])
     )  # state error cost matrix, for the the next (T) prediction time steps [x, y, v, yaw]
     Qfk: list = field(
         default_factory=lambda: np.diag([13.5, 13.5, 13.0, 5.5])
+        # default_factory=lambda: np.diag([2, 2, 5, 25])
     )  # final state error matrix, penalty  for the final state constraints: [x, y, v, yaw]
     # ---------------------------------------------------
 
     N_IND_SEARCH: int = 20  # Search index number
     DTK: float = 0.1  # time step [s] kinematic
-    dlk: float = 0.03  # dist step [m] kinematic
+    dlk: float = 0.05 #0.03  # dist step [m] kinematic
     LENGTH: float = 0.58  # Length of the vehicle [m]
     WIDTH: float = 0.31  # Width of the vehicle [m]
     WB: float = 0.33  # Wheelbase [m]
@@ -52,7 +58,7 @@ class mpc_config:
     MAX_DSTEER: float = np.deg2rad(180.0)  # maximum steering speed [rad/s]
     MAX_SPEED: float = 6.0  # maximum speed [m/s]
     MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
-    MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
+    MAX_ACCEL: float = 2.0 #3.0  # maximum acceleration [m/ss]
 
 
 @dataclass
@@ -73,10 +79,13 @@ class MPC(Node):
         self.pose_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.pose_callback, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
         self.waypoints_pub = self.create_publisher(MarkerArray, '/waypoints', 10)
+        self.ref_pub = self.create_publisher(Path, '/ref_traj', 10)
 
         # get waypoints
         self.waypoints = np.loadtxt('/sim_ws/src/f1tenth_lab7/waypoints/mpc_waypoints.csv', delimiter=',')
-        self.waypoints = self.waypoints[::100]
+        self.waypoints = self.waypoints[::10]
+        self.waypoints 
+        self.waypoints[:,3] = 0.5
         self.publish_waypoints()
 
         self.config = mpc_config()
@@ -85,26 +94,30 @@ class MPC(Node):
         self.init_flag = 0
 
         # initialize MPC problem
-        self.mpc_prob_init()
+        self.mpc_prob_init()        
+
 
     def pose_callback(self, pose_msg):
         # extract pose from ROS msg
         vehicle_state = State()
-        vehicle_state.x = pose_msg.pose.pose.position.y
+        vehicle_state.x = pose_msg.pose.pose.position.x
         vehicle_state.y = pose_msg.pose.pose.position.y
         vehicle_state.v = pose_msg.twist.twist.linear.x
         q = pose_msg.pose.pose.orientation
-        x, y, z, w = q.x, q.y, q.z, q.w
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        vehicle_state.yaw = math.atan2(siny_cosp, cosy_cosp)
-
+        quat = [q.w, q.x, q.y, q.z]
+        _, _, vehicle_state.yaw = euler.quat2euler(quat, axes='sxyz')
+        vehicle_state.yaw = (vehicle_state.yaw+math.pi*2) % math.pi*2
         # Calculate the next reference trajectory for the next T steps
         #       with current vehicle pose.
         #       ref_x, ref_y, ref_yaw, ref_v are columns of self.waypoints
-        ref_path = self.calc_ref_trajectory(vehicle_state, self.waypoints[:,0], self.waypoints[:,1], self.waypoints[:,2], self.waypoints[:,3])
-        x0 = [vehicle_state.x, vehicle_state.y, vehicle_state.v, vehicle_state.yaw]
+        ref_x = self.waypoints[:,0]
+        ref_y = self.waypoints[:,1]
+        ref_yaw = (self.waypoints[:,2]+math.pi*2) % math.pi*2
+        ref_v = self.waypoints[:,3]
 
+        ref_path = self.calc_ref_trajectory(vehicle_state, ref_x, ref_y, ref_yaw, ref_v)
+        self.publish_ref_traj(ref_path)
+        x0 = [vehicle_state.x, vehicle_state.y, vehicle_state.v, vehicle_state.yaw]
 
         # solve the MPC control problem
         (
@@ -117,7 +130,7 @@ class MPC(Node):
             state_predict,
         ) = self.linear_mpc_control(ref_path, x0, self.oa, self.odelta)
 
-        # publish drive message.
+        # publish drive message
         steer_output = self.odelta[0]
         speed_output = vehicle_state.v + self.oa[0] * self.config.DTK
         drive_msg = AckermannDriveStamped()
@@ -126,27 +139,48 @@ class MPC(Node):
         self.drive_pub.publish(drive_msg)
         self.publish_waypoints()
 
+    def publish_ref_traj(self, ref_traj):
+
+        path = Path()
+        path.header.frame_id = "map"
+
+        for t in range(ref_traj.shape[1]):
+            point = ref_traj[:,t]   # x, y, v, yaw
+            pose_stamped = PoseStamped()
+            pose_stamped.pose.position.x = point[0]
+            pose_stamped.pose.position.y = point[1]
+            path.poses.append(pose_stamped)
+
+        self.ref_pub.publish(path)
+
+
     def publish_waypoints(self):
         marker_array = MarkerArray()
 
         for i, waypoint in enumerate(self.waypoints):
+
+            roll = 0.0 
+            pitch = 0.0
+            yaw = waypoint[2]
+            w,x,y,z = euler.euler2quat(roll, pitch, yaw, axes='sxyz')
+
             marker = Marker()
-            marker.header.frame_id = "ego_racecar/base_link"
+            marker.header.frame_id = "map"
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.id = i
-            marker.type = Marker.SPHERE 
+            marker.type = Marker.ARROW
             marker.action = Marker.ADD
             marker.pose.position.x = waypoint[0]
             marker.pose.position.y = waypoint[1]
             marker.pose.position.z = 0.0
-            marker.pose.orientation.x = 0.0
-            marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = 0.0
-            marker.pose.orientation.w = 1.0
+            marker.pose.orientation.x = x
+            marker.pose.orientation.y = y
+            marker.pose.orientation.z = z
+            marker.pose.orientation.w = w
             marker.scale.x = 0.1  
             marker.scale.y = 0.1
             marker.scale.z = 0.1
-            marker.color.a = 1.0  
+            marker.color.a = 1.0
             marker.color.r = 0.0
             marker.color.g = 1.0
             marker.color.b = 0.0
@@ -198,16 +232,13 @@ class MPC(Node):
 
         # --------------------------------------------------------
         # Objective part 1: Influence of the control inputs: Inputs u multiplied by the penalty R
-        for t in range(self.config.TK):
-            objective += cvxpy.quad_form(self.uk[:,t], self.config.Rk)
-
+        objective += cvxpy.quad_form(cvxpy.vec(self.uk), R_block)
+        
         # Objective part 2: Deviation of the vehicle from the reference trajectory weighted by Q, including final Timestep T weighted by Qf
-        for t in range(self.config.TK + 1):
-            objective += cvxpy.quad_form(self.xk[:,t] - self.ref_traj_k[:,t], self.config.Qk if t < self.config.TK else self.config.Qfk)
+        objective += cvxpy.quad_form(cvxpy.vec(self.xk-self.ref_traj_k), Q_block)
 
         # Objective part 3: Difference from one control input to the next control input weighted by Rd
-        for t in range(self.config.TK-1):
-            objective += cvxpy.quad_form(self.uk[:,t+1]-self.uk[:,t], self.config.Rdk)
+        objective += cvxpy.quad_form(cvxpy.vec(cvxpy.diff(self.uk, axis=1)), Rd_block)
 
         # --------------------------------------------------------
 
@@ -264,27 +295,26 @@ class MPC(Node):
         #       Add dynamics constraints to the optimization problem
         #       This constraint should be based on a few variables:
         #       self.xk, self.Ak_, self.Bk_, self.uk, and self.Ck_
-        for t in range(self.config.TK):
-            constraints += [self.xk[:,t+1] == self.Ak_[4*t:4*t+4,4*t:4*t+4] @ self.xk[:, t] + self.Bk_[4*t:4*t+4,2*t:2*t+2] @ self.uk[:, t] + self.Ck_[4*t:4*t+4]]
+        constraints += [cvxpy.vec(self.xk[:, 1:]) == self.Ak_ @ cvxpy.vec(self.xk[:, :-1]) + self.Bk_ @ cvxpy.vec(self.uk) + self.Ck_]
 
         # Constraint part 2:
         #       Add constraints on steering, change in steering angle
         #       cannot exceed steering angle speed limit. Should be based on:
         #       self.uk, self.config.MAX_DSTEER, self.config.DTK
-        for t in range(self.config.TK - 1):
-            constraints += [cvxpy.abs(self.uk[1,t+1] - self.uk[1,t]) / self.config.DTK <= self.config.MAX_DSTEER]
+        constraints += [cvxpy.vec(cvxpy.abs(cvxpy.diff(self.uk[1, :]))) <= self.config.MAX_DSTEER * self.config.DTK]
 
-
-        # Constraint part 3:
+        #  Constraint part 3:
         #       Add constraints on upper and lower bounds of states and inputs
         #       and initial state constraint, should be based on:
         #       self.xk, self.x0k, self.config.MAX_SPEED, self.config.MIN_SPEED,
         #       self.uk, self.config.MAX_ACCEL, self.config.MAX_STEER
-        constraints += [self.xk[:,0] == self.x0k, # init state
-                        self.xk[2,:] <= self.config.MAX_SPEED, self.xk[2,:] >= self.config.MIN_SPEED, # speed limits
-                        self.uk[0,:] <= self.config.MAX_ACCEL, self.uk[0,:] >= -self.config.MAX_ACCEL, # accel limits
-                        self.uk[1,:] <= self.config.MAX_STEER, self.uk[1,:] >= -self.config.MAX_STEER] # steering limits
-
+        constraints += [self.xk[:, 0] == self.x0k, 
+                        self.config.MIN_SPEED <= self.xk[2, :], 
+                        self.xk[2, :] <= self.config.MAX_SPEED, 
+                        -self.config.MAX_STEER <= self.uk[1,:],
+                        self.uk[1,:] <= self.config.MAX_STEER,  
+                        -self.config.MAX_ACCEL <= self.uk[0, :],  
+                        self.uk[0, :] <= self.config.MAX_ACCEL]
 
         # -------------------------------------------------------------
 
@@ -311,6 +341,7 @@ class MPC(Node):
 
         # Find nearest index/setpoint from where the trajectories are calculated
         _, _, _, ind = nearest_point(np.array([state.x, state.y]), np.array([cx, cy]).T)
+        # ind = nearest_point(np.array([state.x, state.y]), np.array([cx, cy]).T)
 
         # Load the initial parameters from the setpoint into the trajectory
         ref_traj[0, 0] = cx[ind]
@@ -508,15 +539,23 @@ def nearest_point(point, trajectory):
         dists[i] = np.sqrt(np.sum(temp*temp))
     min_dist_segment = np.argmin(dists)
     return projections[min_dist_segment], dists[min_dist_segment], t[min_dist_segment], min_dist_segment
+    return min_dist_segment
 
-
+    # min_dist = 10000000
+    # idx = 0
+    # for traj_idx, pose in enumerate(trajectory):
+    #     dist = np.sqrt((pose[0]-point[0])**2 +(pose[1]-point[1])**2)
+    #     if dist < min_dist:
+    #         min_dist = dist
+    #         idx = traj_idx
+    
+    # return idx
 
 def main(args=None):
     rclpy.init(args=args)
     print("MPC Initialized")
     mpc_node = MPC()
     rclpy.spin(mpc_node)
-
     mpc_node.destroy_node()
     rclpy.shutdown()
 

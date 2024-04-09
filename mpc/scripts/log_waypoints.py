@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-import numpy as np
-import atexit
+
 from nav_msgs.msg import Odometry
+
 import os
-from time import gmtime, strftime
-from numpy import linalg as LA
-from geometry_msgs.msg import Quaternion
-import math
+import atexit
+
+from scipy.interpolate import splprep, splev
+from transforms3d.euler import quat2euler
 
 
 path_to_directory = '/sim_ws/src/f1tenth_lab7/waypoints'
@@ -29,16 +29,18 @@ class WaypointLogger(Node):
 
     def save_waypoint(self, data):
         # extract yaw
-        q = data.pose.pose.orientation
-        x, y, z, w = q.x, q.y, q.z, q.w
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
+        roll, pitch, yaw = quat2euler([
+            data.pose.pose.orientation.w,
+            data.pose.pose.orientation.x,
+            data.pose.pose.orientation.y,
+            data.pose.pose.orientation.z,
+        ])
 
         # write x, y, yaw, and velocity to the file
-        file.write('%f, %f, %f, %f\n' % (data.pose.pose.position.x,
-                                         data.pose.pose.position.y,
-                                         yaw,
+
+        file.write('%f, %f, %f, %f\n' % (data.pose.pose.position.x, 
+                                         data.pose.pose.position.y, 
+                                         yaw, 
                                          data.twist.twist.linear.x))
 
 def shutdown():
