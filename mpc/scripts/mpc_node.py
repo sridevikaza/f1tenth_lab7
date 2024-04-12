@@ -31,10 +31,10 @@ class mpc_config:
     # you may need to tune the following matrices
     Rk: list = field(
         # default_factory=lambda: np.diag([0.01, 100.0])
-        default_factory=lambda: np.diag([0.01, 20.0])
+        default_factory=lambda: np.diag([0.01, 1.0])
     )  # input cost matrix, penalty for inputs - [accel, steering]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.01, 20.0])
+        default_factory=lambda: np.diag([0.01, 1.0])
         # default_factory=lambda: np.diag([0.01, 100.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering]
     Qk: list = field(
@@ -83,7 +83,7 @@ class MPC(Node):
 
         # get waypoints
         self.waypoints = np.loadtxt('/sim_ws/src/f1tenth_lab7/waypoints/mpc_waypoints.csv', delimiter=',')
-        self.waypoints = self.waypoints[::10]
+        self.waypoints = self.waypoints[::3]
         self.waypoints 
         self.waypoints[:,3] = 0.5
         self.publish_waypoints()

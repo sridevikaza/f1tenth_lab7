@@ -1,4 +1,4 @@
-# Lab 6: SLAM and Pure Pursuit
+# Lab 7: MPC
 
 ## YouTube video link
-[FILL ME IN](https://tinyurl.com/22mts2ax)
+[Simulation](https://www.youtube.com/watch?v=O3y5_ZFBjv0)
